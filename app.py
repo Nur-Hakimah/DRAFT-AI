@@ -8,6 +8,10 @@ st.set_page_config(
     page_icon="🍅",
     layout="wide"
 )
+st.link_button(
+    "💬 Chat with CookMate AI on Telegram",
+    "https://t.me/CookMateAI123_bot"
+)
 
 # Initialise the database
 initialize_database()
