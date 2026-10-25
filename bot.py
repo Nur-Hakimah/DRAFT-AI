@@ -14,7 +14,7 @@ from telegram.ext import (
 from database import get_connection, initialize_database
 from recipe_matcher import find_matching_recipes
 
-TOKEN = os.getenv("TELEBOT")
+TOKEN = os.getenv("TELEBOT") or os.getenv("TELEGRAM_BOT_TOKEN")
 
 # Shared inventory for the current prototype.
 # This matches the website's USER_ID in app.py.
