@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Local database and personal inventory
+cookmate.db
+inventory.json
+
+# Secrets and environment variables
+.env
+.env.*
+
+# Backup files
+bot_backup.py
+
+# Other virtual environments
+.venv-1/
+.venv-2/
+.venv-3/

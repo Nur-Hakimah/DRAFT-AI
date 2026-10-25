@@ -1,12 +1,20 @@
 
 import streamlit as st
 from datetime import date
+from database import get_connection, initialize_database
 
 st.set_page_config(
     page_title="CookMate AI",
     page_icon="🍅",
     layout="wide"
 )
+
+# Initialise the database
+initialize_database()
+
+# Temporary shared ID for this single-user prototype.
+# We will connect Telegram to this same inventory in the next step.
+USER_ID = "default"
 
 st.markdown("""
 <style>
@@ -37,8 +45,55 @@ h1, h2, h3 {
 </style>
 """, unsafe_allow_html=True)
 
-if "ingredients" not in st.session_state:
-    st.session_state.ingredients = []
+
+def get_ingredients():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT id, name, quantity, expiry_date
+        FROM ingredients
+        WHERE user_id = ?
+        ORDER BY expiry_date
+        """,
+        (USER_ID,)
+    ).fetchall()
+    conn.close()
+
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "quantity": row["quantity"],
+            "expiry": date.fromisoformat(row["expiry_date"])
+            if row["expiry_date"] else date.today()
+        }
+        for row in rows
+    ]
+
+
+def add_ingredient(name, quantity, expiry):
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT INTO ingredients
+        (user_id, name, quantity, expiry_date)
+        VALUES (?, ?, ?, ?)
+        """,
+        (USER_ID, name, quantity, expiry.isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+
+def remove_ingredient(ingredient_id):
+    conn = get_connection()
+    conn.execute(
+        "DELETE FROM ingredients WHERE id = ? AND user_id = ?",
+        (ingredient_id, USER_ID)
+    )
+    conn.commit()
+    conn.close()
+
 
 st.title("🍅 CookMate AI")
 st.write("**Your kitchen, made smarter.**")
@@ -76,22 +131,25 @@ with inventory_tab:
 
         if submitted:
             if ingredient_name.strip():
-                st.session_state.ingredients.append({
-                    "name": ingredient_name.strip(),
-                    "quantity": quantity.strip() or "Not specified",
-                    "expiry": expiry_date
-                })
+                add_ingredient(
+                    ingredient_name.strip(),
+                    quantity.strip() or "Not specified",
+                    expiry_date
+                )
                 st.success(f"Added {ingredient_name.strip()}!")
+                st.rerun()
             else:
                 st.warning("Please enter an ingredient name.")
 
     st.divider()
     st.subheader("Your ingredients")
 
-    if not st.session_state.ingredients:
+    ingredients = get_ingredients()
+
+    if not ingredients:
         st.info("Your kitchen is empty. Add your first ingredient above!")
     else:
-        for i, item in enumerate(st.session_state.ingredients):
+        for item in ingredients:
             days_left = (item["expiry"] - date.today()).days
 
             if days_left < 0:
@@ -109,13 +167,17 @@ with inventory_tab:
                 col2.write(f"Expiry: {item['expiry']}")
                 col3.write(status)
 
-                if st.button("Remove", key=f"remove_{i}"):
-                    st.session_state.ingredients.pop(i)
+                if st.button("Remove", key=f"remove_{item['id']}"):
+                    remove_ingredient(item["id"])
                     st.rerun()
+
 
 with recipe_tab:
     st.subheader("Find recipes from your ingredients")
-    st.write("Select ingredients you want to cook with.")
+    st.write(
+        "CookMate AI matches recipes to your inventory "
+        "and prioritises ingredients that are expiring soon."
+    )
 
     recipes = [
         {
@@ -140,49 +202,127 @@ with recipe_tab:
         }
     ]
 
-    available = [
-        item["name"].lower()
-        for item in st.session_state.ingredients
-    ]
-
     if st.button("✨ Find matching recipes"):
-        matches = []
+        inventory = get_ingredients()
 
-        for recipe in recipes:
-            matched = [
-                ingredient
-                for ingredient in recipe["ingredients"]
-                if any(ingredient in name for name in available)
-            ]
-
-            if matched:
-                matches.append((recipe, matched))
-
-        if matches:
-            for recipe, matched in matches:
-                with st.container(border=True):
-                    st.markdown(f"### 🍽️ {recipe['name']}")
-                    st.write(recipe["description"])
-                    st.write("Ingredients you have: " + ", ".join(matched))
-                    missing = [
-                        ingredient
-                        for ingredient in recipe["ingredients"]
-                        if ingredient not in matched
-                    ]
-                    st.write(
-                        "You may still need: " + ", ".join(missing)
-                        if missing else "You have the listed ingredients!"
-                    )
+        if not inventory:
+            st.info("Add ingredients to My Kitchen first.")
         else:
-            st.info(
-                "No matches yet. Add ingredients such as tomato, egg, "
-                "rice, garlic, chicken, carrot, broccoli, banana or flour."
+            today = date.today()
+            available_names = {
+                item["name"].lower()
+                for item in inventory
+            }
+
+            # Find ingredients that are approaching expiry.
+            expiring_names = {
+                item["name"].lower()
+                for item in inventory
+                if 0 <= (item["expiry"] - today).days <= 3
+            }
+
+            results = []
+
+            for recipe in recipes:
+                matched = [
+                    ingredient
+                    for ingredient in recipe["ingredients"]
+                    if any(
+                        ingredient in name
+                        for name in available_names
+                    )
+                ]
+
+                if not matched:
+                    continue
+
+                missing = [
+                    ingredient
+                    for ingredient in recipe["ingredients"]
+                    if ingredient not in matched
+                ]
+
+                # Match expiring inventory items to recipe ingredients.
+                expiring_matched = [
+                    ingredient
+                    for ingredient in matched
+                    if any(
+                        ingredient in name
+                        for name in expiring_names
+                    )
+                ]
+
+                match_score = len(matched) / len(recipe["ingredients"])
+                waste_score = len(expiring_matched)
+
+                results.append({
+                    "recipe": recipe,
+                    "matched": matched,
+                    "missing": missing,
+                    "expiring_matched": expiring_matched,
+                    "match_score": match_score,
+                    "waste_score": waste_score
+                })
+
+            # Rank recipes by expiring ingredients first,
+            # then by ingredient match percentage.
+            results.sort(
+                key=lambda result: (
+                    result["waste_score"],
+                    result["match_score"]
+                ),
+                reverse=True
             )
+
+            if not results:
+                st.info(
+                    "No matching recipes yet. Try adding tomato, egg, "
+                    "rice, garlic, chicken, carrot, broccoli, banana or flour."
+                )
+            else:
+                for result in results:
+                    recipe = result["recipe"]
+
+                    with st.container(border=True):
+                        st.markdown(f"### 🍽️ {recipe['name']}")
+                        st.write(recipe["description"])
+
+                        st.progress(result["match_score"])
+                        st.caption(
+                            f"Ingredient match: "
+                            f"{result['match_score']:.0%}"
+                        )
+
+                        st.write(
+                            "**Ingredients you have:** "
+                            + ", ".join(result["matched"])
+                        )
+
+                        if result["expiring_matched"]:
+                            st.warning(
+                                "🌱 Helps use ingredients expiring soon: "
+                                + ", ".join(result["expiring_matched"])
+                            )
+                        else:
+                            st.write(
+                                "🌱 No soon-to-expire ingredient matched."
+                            )
+
+                        if result["missing"]:
+                            st.write(
+                                "**You may still need:** "
+                                + ", ".join(result["missing"])
+                            )
+                        else:
+                            st.success(
+                                "You have all the listed recipe ingredients!"
+                            )
 
 with waste_tab:
     st.subheader("Food Waste Tracker 🌱")
 
-    ingredients = st.session_state.ingredients
+    ingredients = get_ingredients()
+
     expiring = [
         item for item in ingredients
         if 0 <= (item["expiry"] - date.today()).days <= 3
@@ -212,4 +352,3 @@ with waste_tab:
 
 st.divider()
 st.caption("CookMate AI • Draft prototype • Less waste, more taste.")
-
